@@ -1,55 +1,59 @@
-import express from 'express';
-import request from 'request'
+var twilio = require('twilio');
+var request = require('request');
 
-const app = express();
-const port = 8080;
+var cycleConnectUrl = 'https://www.cycleconnect.co.uk/';
+var bikeDataStartKey = "Operator.GetMapData.setConfig('StationsData',";
+var bikeDataEndKey = ');';
 
-const cycleConnectUrl = 'https://www.cycleconnect.co.uk/';
-const bikeDataStartKey = "Operator.GetMapData.setConfig('StationsData',";
-const bikeDataEndKey = ');';
+exports.handler = function (event, context, callback) {
+  var client = new twilio.RestClient(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  var responseTemplate = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
-// Middleware
-app.use(function (req, res, next) {
-  console.log('Incoming connection @', Date.now());
-  next();
-});
-
-app.get('/available-bikes', (req, res) => {
   request(cycleConnectUrl, (error, response, body) => {
-    if (!error && response.statusCode === 200) {
-      const bikeData = getBikeData(body);
-      const formattedData = formatBikeData(bikeData);
-      const stationsWithBikes = extractStationAndBikeMap(formattedData);
-      res.send(stationsWithBikes);
-    } else {
-      res.send(error, response.statusCode);
-    }
-  });
-});
+    var bikeData = getBikeData(body);
+    var formattedData = formatBikeData(bikeData);
+    var stationsWithBikes = extractStationAndBikeMap(formattedData);
 
-const getBikeData = (source) => {
-  const start = source.indexOf(bikeDataStartKey);
-  const end = source.indexOf(bikeDataEndKey, start) + bikeDataEndKey.length; // + length so that we get the data including the bikeDataEndKey
+    var stationWhitelist = ['Becketts Park', 'Train Station'];
+    var smsMessage = prettifyStationsWithBikes(stationsWithBikes, stationWhitelist);
 
-  if (start === -1 || end === -1)
-  {
+    var smsOptions = { 
+      to: process.env.TO_PHONE_NUMBER, 
+      from: process.env.FROM_PHONE_NUMBER, 
+      body: smsMessage 
+    };
+
+    client.sendSms(smsOptions, function(error, message) {
+      if (error) {
+        console.log(error);
+      }
+
+      callback(null, responseTemplate);
+    });
+  });  
+};
+
+function getBikeData(source) {
+  var start = source.indexOf(bikeDataStartKey);
+  var end = source.indexOf(bikeDataEndKey, start) + bikeDataEndKey.length; // + length so that we get the data including the bikeDataEndKey
+
+  if (start === -1 || end === -1) {
     return null;
   }
 
   return source.substring(start, end);
 }
 
-const formatBikeData = (data) => {
-  const strippedData = stripDataKeys(data);
-  return JSON.parse(strippedData);
+function formatBikeData(data) {
+  return JSON.parse(stripDataKeys(data));
 }
 
-const stripDataKeys = (data) => {
-  const strippedData =  data.substring(bikeDataStartKey.length);
+function stripDataKeys(data) {
+  var strippedData =  data.substring(bikeDataStartKey.length);
   return strippedData.substring(0, (strippedData.length) - bikeDataEndKey.length);
 }
 
-const extractStationAndBikeMap = (stations) => {
+function extractStationAndBikeMap(stations) {
   return stations.map((station) => {
     return {
       id: station.LocationID,
@@ -64,6 +68,21 @@ const extractStationAndBikeMap = (stations) => {
   });
 };
 
-app.listen(port, () => {
-  console.log('Server listening on port ' + port);
-});
+/*
+ Reduce the array of stations into a list (string with returns) to be displayed by the text
+ stationsWithBikes - Array of stations
+ stationWhitelist - Array of station names to display. If empty/null show all.
+*/
+function prettifyStationsWithBikes(stationsWithBikes, stationWhitelist) {
+  return stationsWithBikes.reduce(function(list, station) {
+    /* 
+      If there is a whitelist which has items, check if the current station is in the list. 
+      If the station is not in the list then ignore it
+    */
+    if (stationWhitelist && stationWhitelist.length > 0 && stationWhitelist.indexOf(station.name) === -1) {
+      return list;
+    }
+
+    return list += (station.name + ': ' + station.bikesAvailable + '/' + station.totalBikeSlots) + '\n';
+  }, '');
+}
